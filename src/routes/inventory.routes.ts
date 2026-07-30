@@ -11,6 +11,7 @@ import {
   getInvoices,
   getTodaySales,
   getAllSales,
+  getBatchItemDetails,
 } from '../controllers/inventory.controller';
 import {
   createCategorySchema,
@@ -21,6 +22,7 @@ import {
   getInvoicesSchema,
   getTodaySalesSchema,
   getAllSalesSchema,
+  getBatchItemDetailsSchema, 
 } from '../validations/inventory.validation';
 
 const router = Router();
@@ -37,6 +39,8 @@ router.get('/categories', getCategories);
 router.get('/items', validate(getItemsSchema), getItems);
 router.post('/items/add', validate(addItemsSchema), addItems);
 router.post('/items/sell', validate(sellItemsSchema), sellItems);
+
+router.post('/items/batch-details', validate(getBatchItemDetailsSchema), getBatchItemDetails);
 
 // Invoice & Dashboard Routes
 router.get('/invoices', validate(getInvoicesSchema), getInvoices);

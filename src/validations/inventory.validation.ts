@@ -82,3 +82,11 @@ export const getTodaySalesSchema = z.object({
       sortOrder: z.enum(['asc', 'desc']).optional(),
     }),
   });
+
+export const getBatchItemDetailsSchema = z.object({
+  body: z.object({
+    barcodes: z.array(z.string().min(1, 'Barcode cannot be empty'))
+      .min(1, 'At least one barcode is required')
+      .max(50, 'Cannot fetch more than 50 items at once to maintain performance'),
+  }),
+});

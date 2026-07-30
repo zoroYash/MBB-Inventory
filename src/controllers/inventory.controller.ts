@@ -360,3 +360,34 @@ export const getAllSales = asyncHandler(async (req: Request, res: Response) => {
     }
   }, 'Total sales and stats retrieved successfully');
 });
+
+export const getBatchItemDetails = asyncHandler(async (req: Request, res: Response) => {
+  const { barcodes } = req.body;
+
+  const uniqueBarcodes = [...new Set(barcodes as string[])];
+
+  const items = await Item.find({ barcode: { $in: uniqueBarcodes } })
+    .populate('category', 'name price imageUrl')
+    .lean(); 
+
+  const availableItems: any[] = [];
+  const soldItems: string[] = [];
+  const foundBarcodes: string[] = [];
+
+  items.forEach(item => {
+    foundBarcodes.push(item.barcode);
+    if (item.status === 'available') {
+      availableItems.push(item);
+    } else {
+      soldItems.push(item.barcode); 
+    }
+  });
+
+  const missingBarcodes = uniqueBarcodes.filter(b => !foundBarcodes.includes(b));
+
+  sendSuccess(res, 200, {
+    availableItems,
+    soldItems,
+    missingBarcodes
+  }, 'Batch item details retrieved successfully');
+});
