@@ -32,27 +32,58 @@ export const updateCategory = asyncHandler(async (req: Request, res: Response, n
 });
 
 export const getCategories = asyncHandler(async (req: Request, res: Response) => {
-  const { page = 1, limit = 10, search, sortBy = 'createdAt', sortOrder = 'desc', minPrice, maxPrice } = req.query;
+  const { 
+    page = 1, 
+    limit = 10, 
+    search, 
+    sortBy = 'createdAt', 
+    sortOrder = 'desc', 
+    minPrice, 
+    maxPrice,
+    outOfStock,     
+    minQuantity,    
+    maxQuantity    
+  } = req.query;
+  
   const query: any = {};
 
-  if (search) query.name = { $regex: search, $options: 'i' };
+  if (search) {
+    query.name = { $regex: search, $options: 'i' };
+  }
+
   if (minPrice || maxPrice) {
     query.price = {};
     if (minPrice) query.price.$gte = Number(minPrice);
     if (maxPrice) query.price.$lte = Number(maxPrice);
   }
 
+  if (outOfStock === 'true') {
+    query.quantity = 0; 
+  } else if (minQuantity !== undefined || maxQuantity !== undefined) {
+    query.quantity = {};
+    if (minQuantity !== undefined) query.quantity.$gte = Number(minQuantity);
+    if (maxQuantity !== undefined) query.quantity.$lte = Number(maxQuantity);
+  }
+
   const skip = (Number(page) - 1) * Number(limit);
   const sortDirection = sortOrder === 'asc' ? 1 : -1;
 
   const [categories, total] = await Promise.all([
-    Category.find(query).sort({ [sortBy as string]: sortDirection }).skip(skip).limit(Number(limit)),
+    Category.find(query)
+      .sort({ [sortBy as string]: sortDirection })
+      .skip(skip)
+      .limit(Number(limit)),
     Category.countDocuments(query),
   ]);
 
   sendSuccess(res, 200, {
     categories,
-    pagination: { total, page: Number(page), limit: Number(limit), totalPages: Math.ceil(total / Number(limit)) },
+    pagination: { 
+      total, 
+      page: Number(page), 
+      limit: Number(limit), 
+      totalPages: Math.ceil(total / Number(limit)) 
+    },
   }, 'Categories retrieved');
 });
 
