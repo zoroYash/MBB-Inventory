@@ -252,7 +252,14 @@ export const getInvoices = asyncHandler(async (req: Request, res: Response) => {
   const sortDirection = sortOrder === 'asc' ? 1 : -1;
 
   const [invoices, total] = await Promise.all([
-    Invoice.find(query).populate('soldBy', 'name email').populate('items', 'barcode')
+    Invoice.find(query).populate('soldBy', 'name email').populate({
+        path: 'items',
+        select: 'barcode category',
+        populate: {
+          path: 'category',
+          select: 'name price'
+        }
+      })
       .sort({ [sortBy as string]: sortDirection }).skip(skip).limit(Number(limit)),
     Invoice.countDocuments(query),
   ]);
