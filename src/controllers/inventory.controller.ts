@@ -12,16 +12,33 @@ import { sendSuccess } from '../utils/responseHandler';
 // =======================
 
 export const createCategory = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
-  const existingCategory = await Category.findOne({ name: req.body.name });
+  let existingCategory = await Category.findOne({ name: req.body.name });
   if (existingCategory) {
+    if (!existingCategory.isActive) {
+      const reactivatedCategory = await Category.findByIdAndUpdate(
+        existingCategory._id,
+        { ...req.body, isActive: true },
+        { new: true, runValidators: true }
+      );
+      return sendSuccess(res, 200, reactivatedCategory, 'Category reactivated successfully');
+    } else {
     return next(new AppError('Category with this name already exists', 400));
+    }
   }
 
-  const category = await Category.create(req.body);
+  const category = await Category.create({ ...req.body, isActive: true });
   sendSuccess(res, 201, category, 'Category created successfully');
 });
 
 export const updateCategory = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  if (req.body.isActive === false) {
+    const categoryCheck = await Category.findById(req.params.id);
+    if (!categoryCheck) return next(new AppError('Category not found', 404));
+    if (categoryCheck.quantity > 0) {
+      return next(new AppError('Cannot deactivate a category that has available stock.', 400));
+    }
+  }
+
   const category = await Category.findByIdAndUpdate(req.params.id, req.body, {
     new: true,
     runValidators: true,
@@ -42,10 +59,15 @@ export const getCategories = asyncHandler(async (req: Request, res: Response) =>
     maxPrice,
     outOfStock,     
     minQuantity,    
-    maxQuantity    
+    maxQuantity,
+    hideDeactivated
   } = req.query;
   
   const query: any = {};
+
+  if (hideDeactivated === 'true') {
+    query.isActive = true;
+  }
 
   if (search) {
     query.name = { $regex: search, $options: 'i' };

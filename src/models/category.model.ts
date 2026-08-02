@@ -6,6 +6,7 @@ export interface ICategory extends Document {
   profitMargin?: number; // In rupees
   imageUrl?: string;
   quantity: number;
+  isActive: boolean; 
 }
 
 const categorySchema = new Schema<ICategory>(
@@ -15,6 +16,7 @@ const categorySchema = new Schema<ICategory>(
     profitMargin: { type: Number, default: 0, min: 0 },
     imageUrl: { type: String, default: null },
     quantity: { type: Number, default: 0, min: 0 },
+    isActive: { type: Boolean, default: true, index: true },
   },
   { timestamps: true }
 );

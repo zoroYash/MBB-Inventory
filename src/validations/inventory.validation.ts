@@ -16,6 +16,7 @@ export const updateCategorySchema = z.object({
     profitMargin: z.number().min(0).optional(),
     // quantity: z.number().min(0).optional(),
     imageUrl: z.string().url().optional().or(z.literal('')),
+    isActive: z.boolean().optional(),
   }),
 });
 
