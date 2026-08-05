@@ -6,7 +6,8 @@ import { Invoice } from '../models/invoice.model';
 import { AppError } from '../utils/AppError';
 import { asyncHandler } from '../utils/asyncHandler';
 import { sendSuccess } from '../utils/responseHandler';
-
+import { parse } from 'csv-parse/sync';
+import { BulkUploadSession } from '../models/bulkUploadSession.model';
 // =======================
 // CATEGORY MANAGEMENT
 // =======================
@@ -450,4 +451,224 @@ export const getBatchItemDetails = asyncHandler(async (req: Request, res: Respon
     soldItems,
     missingBarcodes
   }, 'Batch item details retrieved successfully');
+});
+
+export const bulkUploadItems = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  if (!req.file) return next(new AppError('No CSV file provided', 400));
+
+  let records: any[] = [];
+  try {
+    // Parse CSV synchronously in-memory (safe for limited rows)
+    records = parse(req.file.buffer, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true,
+    });
+  } catch (error) {
+    return next(new AppError('Failed to parse CSV file. Ensure it is a valid CSV format.', 400));
+  }
+
+  const MAX_ROWS = 2000;
+  if (records.length > MAX_ROWS) {
+    return next(new AppError(`File exceeds maximum limit of ${MAX_ROWS} rows per upload.`, 400));
+  }
+  if (records.length === 0) {
+    return next(new AppError('CSV file is empty.', 400));
+  }
+
+  // 1. Create a processing session
+  const sessionDoc = await BulkUploadSession.create({
+    uploadedBy: req.user?._id,
+    status: 'processing',
+    totalRows: records.length,
+  });
+
+  const rowErrors: any[] = [];
+  const validItemsToInsert: any[] = [];
+  const categoryQuantities: Record<string, number> = {};
+
+  try {
+    // 2. Map existing categories for quick lookup
+    const uniqueCatNamesInCSV = [...new Set(records.map(r => r.categoryName?.trim()).filter(Boolean))];
+    const existingCats = await Category.find({
+      name: { $regex: new RegExp(`^(${uniqueCatNamesInCSV.join('|')})$`, 'i') }
+    });
+    
+    const categoryMap = new Map<string, string>(); // lowercase name -> ObjectId
+    existingCats.forEach(c => categoryMap.set(c.name.toLowerCase(), c._id.toString()));
+
+    // 3. Resolve & Create New Categories if requested (isNewCategory === 'true')
+    const categoriesToCreateMap = new Map<string, any>();
+    for (const record of records) {
+      const cName = record.categoryName?.trim();
+      if (!cName) continue;
+      const cNameLower = cName.toLowerCase();
+
+      if (!categoryMap.has(cNameLower)) {
+        const isNew = record.isNewCategory?.toLowerCase() === 'true' || record.isNewCategory?.toLowerCase() === 'yes';
+        if (isNew && !categoriesToCreateMap.has(cNameLower)) {
+          categoriesToCreateMap.set(cNameLower, {
+            name: cName,
+            price: Number(record.price) || 0,
+            profitMargin: Number(record.profitMargin) || 0,
+            isActive: true,
+          });
+        }
+      }
+    }
+
+    // Create the resolved new categories one by one to capture specific validation errors safely
+    for (const [cNameLower, catData] of categoriesToCreateMap.entries()) {
+      try {
+        if (catData.price <= 0) throw new Error('Price is required and must be > 0 for new categories');
+        const newCat = await Category.create(catData);
+        categoryMap.set(cNameLower, newCat._id.toString());
+      } catch (err: any) {
+        // If creation fails, we just don't add it to the categoryMap.
+        // The rows dependent on this category will fail in step 5 with a clear error.
+      }
+    }
+
+    // 4. Pre-fetch existing barcodes to prevent DB duplication
+    const allBarcodesInCSV = records.map(r => r.barcode?.trim()).filter(Boolean);
+    const existingItems = await Item.find({ barcode: { $in: allBarcodesInCSV } }).select('barcode');
+    const existingBarcodes = new Set(existingItems.map(i => i.barcode));
+
+    const barcodesInCurrentUpload = new Set<string>();
+
+    // 5. Evaluate rows sequentially in memory
+    records.forEach((record, index) => {
+      const rowNum = index + 2; // header is row 1
+      const barcode = record.barcode?.trim();
+      const catName = record.categoryName?.trim();
+
+      // Basic Validation
+      if (!barcode) {
+        rowErrors.push({ row: record, reason: `Row ${rowNum}: Barcode is missing` });
+        return;
+      }
+      if (!catName) {
+        rowErrors.push({ row: record, reason: `Row ${rowNum}: Category name is missing` });
+        return;
+      }
+
+      // Check intra-CSV duplicates
+      if (barcodesInCurrentUpload.has(barcode)) {
+        rowErrors.push({ row: record, reason: `Row ${rowNum}: Duplicate barcode '${barcode}' found within the CSV file` });
+        return;
+      }
+      barcodesInCurrentUpload.add(barcode);
+
+      // Check DB duplicates
+      if (existingBarcodes.has(barcode)) {
+        rowErrors.push({ row: record, reason: `Row ${rowNum}: Barcode '${barcode}' already exists in inventory` });
+        return;
+      }
+
+      // Check Category
+      const catId = categoryMap.get(catName.toLowerCase());
+      if (!catId) {
+        rowErrors.push({
+          row: record,
+          reason: `Row ${rowNum}: Category '${catName}' does not exist. (If you meant to create it, set 'isNewCategory' to 'true' and provide a valid 'price' > 0)`,
+        });
+        return;
+      }
+
+      // Record is Valid
+      validItemsToInsert.push({ barcode, category: catId, status: 'available' });
+      categoryQuantities[catId] = (categoryQuantities[catId] || 0) + 1;
+    });
+
+    // 6. Database Transaction for bulk insertion & updates
+    if (validItemsToInsert.length > 0) {
+      const dbSession = await mongoose.startSession();
+      dbSession.startTransaction();
+      try {
+        await Item.insertMany(validItemsToInsert, { session: dbSession });
+
+        const bulkOps = Object.keys(categoryQuantities).map(catId => ({
+          updateOne: {
+            filter: { _id: catId },
+            update: { $inc: { quantity: categoryQuantities[catId] } },
+          },
+        }));
+        await Category.bulkWrite(bulkOps, { session: dbSession });
+
+        await dbSession.commitTransaction();
+      } catch (dbError: any) {
+        await dbSession.abortTransaction();
+        throw new Error(`Database transaction failed during save: ${dbError.message}`);
+      } finally {
+        dbSession.endSession();
+      }
+    }
+
+    // 7. Update Session as Completed
+    sessionDoc.status = 'completed';
+    sessionDoc.created = validItemsToInsert.length;
+    sessionDoc.skipped = rowErrors.length;
+    sessionDoc.errorCount = rowErrors.length;
+    sessionDoc.rowErrors = rowErrors;
+    sessionDoc.summary = {
+      total: records.length,
+      created: validItemsToInsert.length,
+      skipped: rowErrors.length,
+    };
+    await sessionDoc.save();
+
+    sendSuccess(res, 200, sessionDoc, 'Bulk upload processing finished');
+
+  } catch (error: any) {
+    // 8. Handle critical failures
+    sessionDoc.status = 'failed';
+    sessionDoc.rowErrors.push({ row: {}, reason: error.message || 'Unknown critical error' });
+    await sessionDoc.save();
+    return next(new AppError(error.message || 'Bulk upload failed', 500));
+  }
+});
+
+export const getBulkUploadSessions = asyncHandler(async (req: Request, res: Response) => {
+  const { page = 1, limit = 10, status, sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
+  const query: any = {};
+  if (status) query.status = status;
+
+  const skip = (Number(page) - 1) * Number(limit);
+  const sortDirection = sortOrder === 'asc' ? 1 : -1;
+
+  const [sessions, total] = await Promise.all([
+    BulkUploadSession.find(query)
+      .select('-rowErrors') // Don't fetch heavy error logs on list view
+      .populate('uploadedBy', 'name email')
+      .sort({ [sortBy as string]: sortDirection })
+      .skip(skip)
+      .limit(Number(limit)),
+    BulkUploadSession.countDocuments(query),
+  ]);
+
+  sendSuccess(res, 200, {
+    sessions,
+    pagination: { total, page: Number(page), limit: Number(limit), totalPages: Math.ceil(total / Number(limit)) }
+  }, 'Bulk upload sessions retrieved');
+});
+
+export const getBulkUploadSessionDetail = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  const session = await BulkUploadSession.findById(req.params.id).populate('uploadedBy', 'name email');
+  if (!session) return next(new AppError('Session not found', 404));
+  sendSuccess(res, 200, session, 'Session details retrieved');
+});
+
+export const deleteBulkUploadSession = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  const session = await BulkUploadSession.findByIdAndDelete(req.params.id);
+  if (!session) return next(new AppError('Session not found', 404));
+  sendSuccess(res, 200, null, 'Session deleted successfully');
+});
+
+export const bulkDeleteUploadSessions = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  const { ids } = req.body;
+  if (!ids || !Array.isArray(ids) || ids.length === 0) {
+    return next(new AppError('Please provide an array of session IDs to delete.', 400));
+  }
+  await BulkUploadSession.deleteMany({ _id: { $in: ids } });
+  sendSuccess(res, 200, null, 'BULK_UPLOAD_SESSIONS_DELETED');
 });

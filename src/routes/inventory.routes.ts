@@ -12,6 +12,11 @@ import {
   getTodaySales,
   getAllSales,
   getBatchItemDetails,
+  bulkUploadItems,
+  getBulkUploadSessions,
+  bulkDeleteUploadSessions,
+  getBulkUploadSessionDetail,
+  deleteBulkUploadSession,
 } from '../controllers/inventory.controller';
 import {
   createCategorySchema,
@@ -24,6 +29,12 @@ import {
   getAllSalesSchema,
   getBatchItemDetailsSchema, 
 } from '../validations/inventory.validation';
+import multer from 'multer';
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, 
+});
 
 const router = Router();
 
@@ -41,6 +52,12 @@ router.post('/items/add', validate(addItemsSchema), addItems);
 router.post('/items/sell', validate(sellItemsSchema), sellItems);
 
 router.post('/items/batch-details', validate(getBatchItemDetailsSchema), getBatchItemDetails);
+
+router.post('/bulk-upload', upload.single('file'), bulkUploadItems);
+router.get('/bulk-upload/sessions', getBulkUploadSessions);
+router.post('/bulk-upload/sessions/bulk-delete', bulkDeleteUploadSessions);
+router.get('/bulk-upload/sessions/:id', getBulkUploadSessionDetail);
+router.delete('/bulk-upload/sessions/:id', deleteBulkUploadSession);
 
 // Invoice & Dashboard Routes
 router.get('/invoices', validate(getInvoicesSchema), getInvoices);
